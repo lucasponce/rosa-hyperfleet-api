@@ -2,12 +2,6 @@
 
 Design document for end-to-end testing across the full HCP lifecycle on a management cluster.
 
-## TL;DR
-
-If you have come to this document from a CI failure telling you that a test is missing an `hcp:` lifecycle label, you most likely just need to add `Label("hcp:available")` to the `Describe` or `Context` block that contains the test. See [Adding New Tests](#adding-new-tests) for an example.
-
-If you're reviewing this document for the first time, then the general idea is that we have a set of phases that define the lifecycle of a test, and each phase has a corresponding `hcp:` lifecycle label. For example, `hcp:pre-setup` is the phase that runs before the test setup, and `hcp:setup` is the phase that runs during the test setup.
-
 ## Problem
 
 As the platform grows, feature developers need a predictable way to hook tests into the HCP lifecycle without understanding the entire test suite. Today, tests are ordered implicitly by file position within a single `Ordered` Ginkgo suite. Labels exist (`setup`, `create`, `monitor`, `cleanup`) but aren't formalized — there's no contract about what state is available at each phase, no way to slot new tests between phases, and no enforcement that reserved labels aren't misused.
@@ -219,7 +213,7 @@ var _ = Describe("HCP Metrics", Label("hcp:available"), func() {
 
 ### Labels
 
-Labels are freeform. Any label can be applied to any spec. The `hcp:` prefixed lifecycle labels control *when* a spec runs in the lifecycle; additional labels are encouraged for feature-level filtering:
+Labels are freeform. Any label can be applied to any spec. The `hcp:` prefixed lifecycle labels control _when_ a spec runs in the lifecycle; additional labels are encouraged for feature-level filtering:
 
 ```go
 Context("HCP metrics", Label("hcp:available", "hcp-metrics"), func() {
