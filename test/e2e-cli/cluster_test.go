@@ -503,6 +503,60 @@ var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 		GinkgoWriter.Printf("Deleted %d resource bundles for cluster %s\n", deletedCount, clusterID)
 	})
 
+	It("should wait for resource bundles to be fully removed", Label("bundles-wait", "cleanup"), func() {
+		if clusterID == "" {
+			clusterID = os.Getenv("HCP_INSTANCE_ID")
+			if clusterID == "" {
+				Skip("clusterID not set - run full Ordered suite or set HCP_INSTANCE_ID")
+			}
+		}
+
+		GinkgoWriter.Printf("Waiting for resource bundles for cluster %s to be fully removed...\n", clusterID)
+
+		Eventually(func(g Gomega) {
+			remaining := 0
+			page := 1
+			for {
+				response, err := apiClient.Get(fmt.Sprintf("/api/v0/resource_bundles?page=%d&size=100", page), accountID)
+				g.Expect(err).ToNot(HaveOccurred())
+				g.Expect(response.StatusCode).To(Equal(http.StatusOK))
+
+				var list struct {
+					Page  int                      `json:"page"`
+					Size  int                      `json:"size"`
+					Total int                      `json:"total"`
+					Items []map[string]interface{} `json:"items"`
+				}
+				g.Expect(json.Unmarshal(response.Body, &list)).To(Succeed())
+
+				for _, item := range list.Items {
+					metadata, ok := item["metadata"].(map[string]interface{})
+					if !ok {
+						continue
+					}
+					name, ok := metadata["name"].(string)
+					if !ok {
+						continue
+					}
+					if strings.Contains(name, clusterID) {
+						remaining++
+					}
+				}
+
+				if page*100 >= list.Total || len(list.Items) == 0 {
+					break
+				}
+				page++
+			}
+
+			GinkgoWriter.Printf("Resource bundles remaining for cluster %s: %d\n", clusterID, remaining)
+			g.Expect(remaining).To(Equal(0), "resource bundles for cluster %s still exist", clusterID)
+		}).WithTimeout(15*time.Minute).WithPolling(30*time.Second).Should(Succeed(),
+			"resource bundles should be fully removed before proceeding with infrastructure teardown")
+
+		GinkgoWriter.Printf("All resource bundles for cluster %s have been removed\n", clusterID)
+	})
+
 	It("should be able to delete the cluster-oidc", Label("oidc-delete", "cleanup"), func() {
 		GinkgoWriter.Printf("Deleting the cluster-oidc: %s\n", clusterName)
 		cmd := exec.Command(ROSACTL_BIN, "cluster-oidc", "delete", clusterName, "--region", region)
