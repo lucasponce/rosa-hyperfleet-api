@@ -1,35 +1,20 @@
 package e2e_monitoring_test
 
 import (
-	"os"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	awstest "github.com/openshift/rosa-regional-platform-api/internal/test/aws"
 	"github.com/openshift/rosa-regional-platform-api/internal/test/thanos"
 )
 
-var _ = Describe("Logging", FlakeAttempts(2), func() {
-	var (
-		rhobsAPIURL string
-		rhobsClient *awstest.APIClient
-	)
-
-	BeforeEach(func() {
-		rhobsAPIURL = os.Getenv("E2E_RHOBS_API_URL")
-		if rhobsAPIURL == "" {
-			Skip("E2E_RHOBS_API_URL not set — skipping observability tests")
-		}
-		rhobsClient = awstest.NewAPIClient(rhobsAPIURL)
-	})
+var _ = Describe("Observability", FlakeAttempts(2), func() {
 
 	It("should have RC CloudWatch metrics in Thanos", func() {
 		query := `count(aws_eks_apiserver_storage_size_bytes_maximum{cluster_type="regional-cluster"}) > 0`
 		Eventually(func() bool {
 			resp := thanos.Query(rhobsClient, query)
 			return resp.Status == "success" && len(resp.Data.Result) > 0
-		}, "10m", "15s").Should(BeTrue(),
+		}, "1m", "15s").Should(BeTrue(),
 			"Expected CloudWatch EKS metrics with cluster_type=regional-cluster in Thanos "+
 				"(CW Exporter → RC Prometheus → Thanos Receive)")
 	})
@@ -39,7 +24,7 @@ var _ = Describe("Logging", FlakeAttempts(2), func() {
 		Eventually(func() bool {
 			resp := thanos.Query(rhobsClient, query)
 			return resp.Status == "success" && len(resp.Data.Result) > 0
-		}, "10m", "15s").Should(BeTrue(),
+		}, "1m", "15s").Should(BeTrue(),
 			"Expected CloudWatch EKS metrics with cluster_type=management-cluster in Thanos "+
 				"(CW Exporter → MC Prometheus → remote-write → RHOBS API GW → Thanos Receive)")
 	})
@@ -49,7 +34,7 @@ var _ = Describe("Logging", FlakeAttempts(2), func() {
 		Eventually(func() bool {
 			resp := thanos.Query(rhobsClient, query)
 			return resp.Status == "success" && len(resp.Data.Result) > 0
-		}, "10m", "15s").Should(BeTrue(),
+		}, "1m", "15s").Should(BeTrue(),
 			"Expected Vector sink metrics with cluster_type=regional-cluster in Thanos "+
 				"(Vector PodMonitor → RC Prometheus → Thanos Receive)")
 	})
@@ -59,7 +44,7 @@ var _ = Describe("Logging", FlakeAttempts(2), func() {
 		Eventually(func() bool {
 			resp := thanos.Query(rhobsClient, query)
 			return resp.Status == "success" && len(resp.Data.Result) > 0
-		}, "10m", "15s").Should(BeTrue(),
+		}, "1m", "15s").Should(BeTrue(),
 			"Expected Vector sink metrics with cluster_type=management-cluster in Thanos "+
 				"(Vector PodMonitor → MC Prometheus → sigv4-proxy → RHOBS API GW → Thanos Receive)")
 	})
@@ -69,7 +54,7 @@ var _ = Describe("Logging", FlakeAttempts(2), func() {
 		Eventually(func() bool {
 			resp := thanos.Query(rhobsClient, query)
 			return resp.Status == "success" && len(resp.Data.Result) > 0
-		}, "10m", "15s").Should(BeTrue(),
+		}, "1m", "15s").Should(BeTrue(),
 			"Expected Loki distributor metrics with cluster_type=regional-cluster in Thanos "+
 				"(Loki ServiceMonitor → RC Prometheus → Thanos Receive)")
 	})
@@ -77,38 +62,26 @@ var _ = Describe("Logging", FlakeAttempts(2), func() {
 })
 
 var _ = Describe("Alerting", FlakeAttempts(2), func() {
-	var (
-		rhobsAPIURL string
-		rhobsClient *awstest.APIClient
-	)
-
-	BeforeEach(func() {
-		rhobsAPIURL = os.Getenv("E2E_RHOBS_API_URL")
-		if rhobsAPIURL == "" {
-			Skip("E2E_RHOBS_API_URL not set — skipping alerting tests")
-		}
-		rhobsClient = awstest.NewAPIClient(rhobsAPIURL)
-	})
 
 	Context("HCP recording rules", func() {
 		It("should have hcp:hostedcluster_available recording rule loaded", func() {
 			Eventually(func() bool {
 				return thanos.HasRule(rhobsClient, "record", "hcp:hostedcluster_available")
-			}, "5m", "15s").Should(BeTrue(),
+			}, "1m", "15s").Should(BeTrue(),
 				"Expected recording rule hcp:hostedcluster_available to be loaded in Thanos Ruler")
 		})
 
 		It("should have hcp:lifecycle_installing recording rule loaded", func() {
 			Eventually(func() bool {
 				return thanos.HasRule(rhobsClient, "record", "hcp:lifecycle_installing")
-			}, "5m", "15s").Should(BeTrue(),
+			}, "1m", "15s").Should(BeTrue(),
 				"Expected recording rule hcp:lifecycle_installing to be loaded in Thanos Ruler")
 		})
 
 		It("should have hcp:lifecycle_deleting recording rule loaded", func() {
 			Eventually(func() bool {
 				return thanos.HasRule(rhobsClient, "record", "hcp:lifecycle_deleting")
-			}, "5m", "15s").Should(BeTrue(),
+			}, "1m", "15s").Should(BeTrue(),
 				"Expected recording rule hcp:lifecycle_deleting to be loaded in Thanos Ruler")
 		})
 	})
@@ -117,7 +90,7 @@ var _ = Describe("Alerting", FlakeAttempts(2), func() {
 		It("should have HCPAvailabilityErrorBudgetFastBurn alert loaded", func() {
 			Eventually(func() bool {
 				return thanos.HasRule(rhobsClient, "alert", "HCPAvailabilityErrorBudgetFastBurn")
-			}, "5m", "15s").Should(BeTrue(),
+			}, "1m", "15s").Should(BeTrue(),
 				"Expected alerting rule HCPAvailabilityErrorBudgetFastBurn to be loaded in Thanos Ruler "+
 					"(14.4x burn rate, ~6min window)")
 		})
@@ -125,7 +98,7 @@ var _ = Describe("Alerting", FlakeAttempts(2), func() {
 		It("should have HCPAvailabilityErrorBudgetSlowBurn alert loaded", func() {
 			Eventually(func() bool {
 				return thanos.HasRule(rhobsClient, "alert", "HCPAvailabilityErrorBudgetSlowBurn")
-			}, "5m", "15s").Should(BeTrue(),
+			}, "1m", "15s").Should(BeTrue(),
 				"Expected alerting rule HCPAvailabilityErrorBudgetSlowBurn to be loaded in Thanos Ruler "+
 					"(6x burn rate, ~32min window)")
 		})
@@ -135,7 +108,7 @@ var _ = Describe("Alerting", FlakeAttempts(2), func() {
 		It("should have HCPInstallTimeout15m alert loaded", func() {
 			Eventually(func() bool {
 				return thanos.HasRule(rhobsClient, "alert", "HCPInstallTimeout15m")
-			}, "5m", "15s").Should(BeTrue(),
+			}, "1m", "15s").Should(BeTrue(),
 				"Expected alerting rule HCPInstallTimeout15m to be loaded in Thanos Ruler")
 		})
 	})

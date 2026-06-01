@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -13,8 +12,6 @@ import (
 	awstest "github.com/openshift/rosa-regional-platform-api/internal/test/aws"
 )
 
-// lokiQueryResponse represents the Loki HTTP query API response.
-// Loki's query_range and instant query share this structure.
 type lokiQueryResponse struct {
 	Status string `json:"status"`
 	Data   struct {
@@ -27,25 +24,13 @@ type lokiQueryResponse struct {
 }
 
 var _ = Describe("Logging", Ordered, func() {
-	var (
-		rhobsAPIURL string
-		rhobsClient *awstest.APIClient
-	)
-
-	BeforeAll(func() {
-		rhobsAPIURL = os.Getenv("E2E_RHOBS_API_URL")
-		if rhobsAPIURL == "" {
-			Skip("E2E_RHOBS_API_URL not set — skipping logging tests")
-		}
-		rhobsClient = awstest.NewAPIClient(rhobsAPIURL)
-	})
 
 	It("should have logs from regional-cluster in Loki", func() {
 		query := `{cluster_type="regional-cluster"}`
 		Eventually(func() bool {
 			resp := queryLoki(rhobsClient, query)
 			return resp.Status == "success" && len(resp.Data.Result) > 0
-		}, "10m", "15s").Should(BeTrue(),
+		}, "1m", "15s").Should(BeTrue(),
 			"Expected logs with cluster_type=regional-cluster in Loki "+
 				"(Vector DaemonSet → Loki Distributor)")
 	})
@@ -55,7 +40,7 @@ var _ = Describe("Logging", Ordered, func() {
 		Eventually(func() bool {
 			resp := queryLoki(rhobsClient, query)
 			return resp.Status == "success" && len(resp.Data.Result) > 0
-		}, "10m", "15s").Should(BeTrue(),
+		}, "1m", "15s").Should(BeTrue(),
 			"Expected logs with cluster_type=management-cluster in Loki "+
 				"(Vector DaemonSet → sigv4-proxy → RHOBS API GW → Loki Distributor)")
 	})
