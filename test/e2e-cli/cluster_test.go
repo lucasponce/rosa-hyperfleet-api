@@ -47,6 +47,75 @@ func customerEnv() []string {
 	return []string{"AWS_PROFILE=" + os.Getenv("CUSTOMER_AWS_PROFILE")}
 }
 
+type bundleItem struct {
+	ID   string
+	Name string
+}
+
+func listClusterBundles(apiClient *e2e.APIClient, clusterID, accountID string) []bundleItem {
+	var matched []bundleItem
+	page := 1
+	for {
+		resp, err := apiClient.Get(fmt.Sprintf("/api/v0/resource_bundles?page=%d&size=100", page), accountID)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			break
+		}
+		var list struct {
+			Total int                      `json:"total"`
+			Items []map[string]interface{} `json:"items"`
+		}
+		if json.Unmarshal(resp.Body, &list) != nil {
+			break
+		}
+		for _, item := range list.Items {
+			meta, _ := item["metadata"].(map[string]interface{})
+			name, _ := meta["name"].(string)
+			if strings.Contains(name, clusterID) {
+				id, _ := item["id"].(string)
+				matched = append(matched, bundleItem{ID: id, Name: name})
+			}
+		}
+		if len(list.Items) == 0 || page*100 >= list.Total {
+			break
+		}
+		page++
+	}
+	return matched
+}
+
+func deleteClusterBundles(apiClient *e2e.APIClient, clusterID, accountID string) int {
+	bundles := listClusterBundles(apiClient, clusterID, accountID)
+	for _, b := range bundles {
+		GinkgoWriter.Printf("Deleting bundle %s (%s)\n", b.ID, b.Name)
+		apiClient.Delete("/api/v0/resource_bundles/"+b.ID, accountID) //nolint:errcheck
+	}
+	return len(bundles)
+}
+
+func waitForBundleRemoval(apiClient *e2e.APIClient, clusterID, accountID string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if len(listClusterBundles(apiClient, clusterID, accountID)) == 0 {
+			GinkgoWriter.Printf("All resource bundles for cluster %s removed\n", clusterID)
+			return true
+		}
+		GinkgoWriter.Printf("Resource bundles still present, waiting...\n")
+		time.Sleep(30 * time.Second)
+	}
+	return false
+}
+
+func fireAndForgetInfraDelete(rosactlBin, clusterName, region string, resources []string) {
+	for _, subCmd := range resources {
+		GinkgoWriter.Printf("Cleanup: firing %s delete %s (fire-and-forget)\n", subCmd, clusterName)
+		cmd := exec.Command(rosactlBin, subCmd, "delete", clusterName, "--region", region)
+		cmd.Env = append(os.Environ(), customerEnv()...)
+		if err := cmd.Start(); err != nil {
+			GinkgoWriter.Printf("Cleanup WARNING: failed to start %s delete: %v\n", subCmd, err)
+		}
+	}
+}
+
 var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 	var (
 		baseURL           string
@@ -64,6 +133,10 @@ var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 		vpcCreated  bool
 		iamCreated  bool
 		oidcCreated bool
+
+		// Set to true when the normal cleanup specs complete successfully.
+		// DeferCleanup uses this to skip redundant work on the happy path.
+		cleanupCompleted bool
 	)
 
 	BeforeAll(func() {
@@ -126,13 +199,16 @@ var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 
 		apiClient = e2e.NewAPIClient(baseURL)
 
-		// Unconditional cleanup: runs after the Ordered container finishes,
-		// regardless of whether tests pass or fail. This prevents resource
-		// leaks when mid-suite failures cause Ginkgo to skip cleanup specs.
+		// Safety-net cleanup: runs after the Ordered container finishes,
+		// but only does work when the normal cleanup specs were skipped
+		// (i.e., a mid-suite failure caused Ginkgo to skip them).
 		DeferCleanup(func() {
-			GinkgoWriter.Printf("\n=== DeferCleanup: ensuring all test resources are removed ===\n")
+			if cleanupCompleted {
+				GinkgoWriter.Printf("\n=== DeferCleanup: normal cleanup already ran, nothing to do ===\n")
+				return
+			}
+			GinkgoWriter.Printf("\n=== DeferCleanup: safety-net cleanup (normal cleanup was skipped) ===\n")
 
-			// 1. Delete HCP cluster via Platform API
 			if hcpCreated && clusterID != "" {
 				GinkgoWriter.Printf("Cleanup: deleting HCP cluster %s (id: %s)\n", clusterName, clusterID)
 				resp, err := apiClient.Delete("/api/v0/clusters/"+clusterID, accountID)
@@ -142,7 +218,6 @@ var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 					GinkgoWriter.Printf("Cleanup WARNING: delete cluster returned status %d: %s\n", resp.StatusCode, string(resp.Body))
 				} else {
 					GinkgoWriter.Printf("Cleanup: HCP cluster delete accepted (status %d)\n", resp.StatusCode)
-					// Wait for cluster deletion to propagate (best-effort, 5 min timeout)
 					deadline := time.Now().Add(5 * time.Minute)
 					for time.Now().Before(deadline) {
 						time.Sleep(15 * time.Second)
@@ -153,107 +228,23 @@ var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 						}
 					}
 				}
+
+				deleteClusterBundles(apiClient, clusterID, accountID)
+				waitForBundleRemoval(apiClient, clusterID, accountID, 5*time.Minute)
 			}
 
-			// 2. Delete resource bundles for this cluster
-			if hcpCreated && clusterID != "" {
-				GinkgoWriter.Printf("Cleanup: deleting resource bundles for cluster %s\n", clusterID)
-				page := 1
-				for {
-					resp, err := apiClient.Get(fmt.Sprintf("/api/v0/resource_bundles?page=%d&size=100", page), accountID)
-					if err != nil || resp.StatusCode != http.StatusOK {
-						break
-					}
-					var list struct {
-						Total int                      `json:"total"`
-						Items []map[string]interface{} `json:"items"`
-					}
-					if json.Unmarshal(resp.Body, &list) != nil {
-						break
-					}
-					for _, item := range list.Items {
-						meta, _ := item["metadata"].(map[string]interface{})
-						workID, _ := meta["name"].(string)
-						if strings.Contains(workID, clusterID) {
-							bundleID, _ := item["id"].(string)
-							GinkgoWriter.Printf("Cleanup: deleting bundle %s\n", bundleID)
-							apiClient.Delete("/api/v0/resource_bundles/"+bundleID, accountID) //nolint:errcheck
-						}
-					}
-					if len(list.Items) == 0 || page*100 >= list.Total {
-						break
-					}
-					page++
-				}
+			var stacks []string
+			if oidcCreated {
+				stacks = append(stacks, "cluster-oidc")
 			}
-
-			// 3. Wait for resource bundles to be fully removed before CF stack
-			// teardown. If bundles still exist, Maestro agent can recreate
-			// ManifestWorks and namespaces on the MC, blocking MC deletion.
-			if hcpCreated && clusterID != "" {
-				GinkgoWriter.Printf("Cleanup: waiting for resource bundles to be fully removed...\n")
-				deadline := time.Now().Add(5 * time.Minute)
-				for time.Now().Before(deadline) {
-					remaining := 0
-					page := 1
-					for {
-						resp, err := apiClient.Get(fmt.Sprintf("/api/v0/resource_bundles?page=%d&size=100", page), accountID)
-						if err != nil || resp.StatusCode != http.StatusOK {
-							break
-						}
-						var list struct {
-							Total int                      `json:"total"`
-							Items []map[string]interface{} `json:"items"`
-						}
-						if json.Unmarshal(resp.Body, &list) != nil {
-							break
-						}
-						for _, item := range list.Items {
-							meta, _ := item["metadata"].(map[string]interface{})
-							name, _ := meta["name"].(string)
-							if strings.Contains(name, clusterID) {
-								remaining++
-							}
-						}
-						if page*100 >= list.Total || len(list.Items) == 0 {
-							break
-						}
-						page++
-					}
-					if remaining == 0 {
-						GinkgoWriter.Printf("Cleanup: all resource bundles removed\n")
-						break
-					}
-					GinkgoWriter.Printf("Cleanup: %d resource bundles remaining, waiting...\n", remaining)
-					time.Sleep(30 * time.Second)
-				}
+			if vpcCreated {
+				stacks = append(stacks, "cluster-vpc")
 			}
-
-			// 4-6. Delete customer CF stacks (OIDC, VPC, IAM) — fire-and-forget.
-			//
-			// These are CloudFormation stacks in the customer account. CF continues
-			// deleting asynchronously even after rosactl times out (VPC deletion
-			// takes ~19 min but rosactl's waiter is 15 min). We fire the delete
-			// commands without waiting so DeferCleanup fits in the remaining step
-			// time budget (~25 min after a 35-min cluster-status timeout).
-			// The aws-nuke janitor handles any stacks that fail to delete.
-			for _, res := range []struct {
-				created bool
-				subCmd  string
-			}{
-				{oidcCreated, "cluster-oidc"},
-				{vpcCreated, "cluster-vpc"},
-				{iamCreated, "cluster-iam"},
-			} {
-				if !res.created || clusterName == "" || ROSACTL_BIN == "" {
-					continue
-				}
-				GinkgoWriter.Printf("Cleanup: firing %s delete %s (fire-and-forget)\n", res.subCmd, clusterName)
-				cmd := exec.Command(ROSACTL_BIN, res.subCmd, "delete", clusterName, "--region", region)
-				cmd.Env = append(os.Environ(), customerEnv()...)
-				if err := cmd.Start(); err != nil {
-					GinkgoWriter.Printf("Cleanup WARNING: failed to start %s delete: %v\n", res.subCmd, err)
-				}
+			if iamCreated {
+				stacks = append(stacks, "cluster-iam")
+			}
+			if len(stacks) > 0 && clusterName != "" && ROSACTL_BIN != "" {
+				fireAndForgetInfraDelete(ROSACTL_BIN, clusterName, region, stacks)
 			}
 
 			GinkgoWriter.Printf("=== DeferCleanup complete ===\n")
@@ -589,8 +580,6 @@ var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 		GinkgoWriter.Printf("HCP cluster deleted successfully: %s\n", clusterName)
 	})
 
-	// delete the hcp cluster
-	// delete all resource bundles
 	It("should be able to delete the resource bundles", Label("hcp-delete", "bundles-delete", "cleanup"), func() {
 		if clusterID == "" {
 			clusterID = os.Getenv("HCP_INSTANCE_ID")
@@ -599,52 +588,8 @@ var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 			}
 		}
 
-		GinkgoWriter.Printf("Querying platform api for /resource_bundles\n")
-
-		// Fetch all pages of resource bundles
-		allBundles := []map[string]interface{}{}
-		page := 1
-		for {
-			response, err := apiClient.Get(fmt.Sprintf("/api/v0/resource_bundles?page=%d&size=100", page), accountID)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(response.StatusCode).To(Equal(http.StatusOK))
-
-			var list struct {
-				Page  int                      `json:"page"`
-				Size  int                      `json:"size"`
-				Total int                      `json:"total"`
-				Items []map[string]interface{} `json:"items"`
-			}
-			err = json.Unmarshal(response.Body, &list)
-			Expect(err).To(BeNil())
-
-			allBundles = append(allBundles, list.Items...)
-			GinkgoWriter.Printf("Fetched page %d: %d bundles (total: %d)\n", page, len(list.Items), list.Total)
-
-			// Check if we've fetched all items
-			if len(allBundles) >= list.Total || len(list.Items) == 0 {
-				break
-			}
-			page++
-		}
-
-		GinkgoWriter.Printf("Total bundles fetched: %d\n", len(allBundles))
-
-		// Delete bundles matching the cluster ID
-		deletedCount := 0
-		for _, item := range allBundles {
-			workID := item["metadata"].(map[string]interface{})["name"].(string) // this is the work id
-			if strings.Contains(workID, clusterID) {
-				GinkgoWriter.Printf("Deleting bundle ID: %s, Name: %s\n", item["id"], workID)
-				response, err := apiClient.Delete("/api/v0/resource_bundles/"+item["id"].(string), accountID)
-				Expect(err).ToNot(HaveOccurred())
-				// accept 204 or 200
-				Expect(response.StatusCode).To(Or(Equal(http.StatusNoContent), Equal(http.StatusOK)))
-				GinkgoWriter.Printf("Resource bundle deleted successfully: %s\n", item["id"])
-				deletedCount++
-			}
-		}
-		GinkgoWriter.Printf("Deleted %d resource bundles for cluster %s\n", deletedCount, clusterID)
+		deleted := deleteClusterBundles(apiClient, clusterID, accountID)
+		GinkgoWriter.Printf("Deleted %d resource bundles for cluster %s\n", deleted, clusterID)
 	})
 
 	It("should wait for resource bundles to be fully removed", Label("bundles-wait", "cleanup"), func() {
@@ -658,43 +603,8 @@ var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 		GinkgoWriter.Printf("Waiting for resource bundles for cluster %s to be fully removed...\n", clusterID)
 
 		Eventually(func(g Gomega) {
-			remaining := 0
-			page := 1
-			for {
-				response, err := apiClient.Get(fmt.Sprintf("/api/v0/resource_bundles?page=%d&size=100", page), accountID)
-				g.Expect(err).ToNot(HaveOccurred())
-				g.Expect(response.StatusCode).To(Equal(http.StatusOK))
-
-				var list struct {
-					Page  int                      `json:"page"`
-					Size  int                      `json:"size"`
-					Total int                      `json:"total"`
-					Items []map[string]interface{} `json:"items"`
-				}
-				g.Expect(json.Unmarshal(response.Body, &list)).To(Succeed())
-
-				for _, item := range list.Items {
-					metadata, ok := item["metadata"].(map[string]interface{})
-					if !ok {
-						continue
-					}
-					name, ok := metadata["name"].(string)
-					if !ok {
-						continue
-					}
-					if strings.Contains(name, clusterID) {
-						remaining++
-					}
-				}
-
-				if page*100 >= list.Total || len(list.Items) == 0 {
-					break
-				}
-				page++
-			}
-
-			GinkgoWriter.Printf("Resource bundles remaining for cluster %s: %d\n", clusterID, remaining)
-			g.Expect(remaining).To(Equal(0), "resource bundles for cluster %s still exist", clusterID)
+			g.Expect(listClusterBundles(apiClient, clusterID, accountID)).To(BeEmpty(),
+				"resource bundles for cluster %s still exist", clusterID)
 		}).WithTimeout(15*time.Minute).WithPolling(30*time.Second).Should(Succeed(),
 			"resource bundles should be fully removed before proceeding with infrastructure teardown")
 
@@ -752,7 +662,6 @@ var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 		Fail(fmt.Sprintf("cluster-vpc delete failed after %d attempts: %v\nOutput:\n%s", maxAttempts, lastErr, string(lastOutput)))
 	})
 
-	// it should be able to delete the cluster-iam
 	It("should be able to delete the cluster-iam", Label("iam-delete", "cleanup"), func() {
 		GinkgoWriter.Printf("Deleting the cluster-iam: %s\n", clusterName)
 		cmd := exec.Command(ROSACTL_BIN, "cluster-iam", "delete", clusterName, "--region", region)
@@ -762,6 +671,8 @@ var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 			Fail(fmt.Sprintf("Failed to delete the cluster-iam: %v\nOutput:\n%s", err, string(output)))
 		}
 		GinkgoWriter.Printf("Cluster-IAM deleted successfully: %s\n", clusterName)
+
+		cleanupCompleted = true
 	})
 
 })
